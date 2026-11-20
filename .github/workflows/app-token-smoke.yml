@@ -1,0 +1,28 @@
+name: App token smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to comment on
+        required: true
+        type: number
+
+permissions: {} # the built-in token gets nothing; the App token does the work
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+      - name: Comment as the App
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE: ${{ inputs.issue }}
+        run: |
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "Smoke test: the factory App can act on this repo."
