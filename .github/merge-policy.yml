@@ -1,0 +1,9 @@
+# What may merge without a person. Read from the base branch, so a pull request cannot loosen its own policy.
+# Hard limits (workflows, factory files, infrastructure, auth, security, migrations, dependency manifests,
+# open security findings, the size cap, the hold label) always need a person and are not set here.
+
+mode: auto              # off | suggest | auto
+max_changed_lines: 400  # larger pull requests need a person
+require_human_paths:
+  - docs/architecture/**
+hold_minutes: 30        # time for a person to add the hold label before an auto-merge

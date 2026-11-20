@@ -1,0 +1,71 @@
+name: Agent task
+description: One ticket that an agent or a person can build in a single pull request.
+title: "[task] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write this so an agent could build it without asking. If it does not fit one pull request, split it first.
+        The route label (`route:agent` or `route:human`) decides who starts it; the field below only records the suggestion.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing, and for whom.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: One line each. Every criterion must be checkable by a test, a check or a short manual step.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: dropdown
+    id: tests
+    attributes:
+      label: Tests expected
+      options:
+        - "Yes"
+        - "No"
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files in scope
+      description: The files or folders this ticket may change.
+    validations:
+      required: true
+  - type: input
+    id: plan
+    attributes:
+      label: Plan
+      description: Link to the section of the plan in docs/plans/ this ticket comes from.
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk tier
+      options:
+        - Low
+        - Medium
+        - High
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Suggested route
+      options:
+        - Agent
+        - Human
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything else the builder needs to know.
