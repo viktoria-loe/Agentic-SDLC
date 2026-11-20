@@ -18,7 +18,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.FACTORY_APP_ID }}
+          client-id: ${{ vars.FACTORY_APP_CLIENT_ID }}
           private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
       - name: Comment as the App
         env:
