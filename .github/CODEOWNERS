@@ -1,0 +1,15 @@
+# Paths a person must review. Later lines override earlier ones.
+
+# Factory files
+/.github/ @viktoria-loe
+/.claude/ @viktoria-loe
+/AGENTS.md @viktoria-loe
+/CLAUDE.md @viktoria-loe
+
+# Synced skills have no owner, so the skills sync pull request can merge itself
+/.github/skills/
+
+# Paths from merge-policy.yml require_human_paths
+/docs/architecture/ @viktoria-loe
+
+# Add infrastructure, auth, security, migration and dependency-manifest paths here once the product is chosen
