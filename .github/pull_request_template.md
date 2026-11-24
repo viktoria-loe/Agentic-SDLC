@@ -1,14 +1,32 @@
 Closes #
 
+Plan: link to the plan section in `docs/plans/` this ticket comes from.
+
 ## Goals
 
 One per acceptance criterion; tick each when its test passes.
 
 - [ ] 
 
+## Scope
+
+The paths this pull request changes. They should match the ticket's files in scope.
+
+## Risks
+
+What could break, and the ticket's risk tier.
+
+## Rollback
+
+How to undo this if it goes wrong (usually: revert this pull request), and anything a revert does not undo, such as data or settings.
+
+## Decisions
+
+Choices made while building that the ticket and plan did not settle, and why. "None" if nothing.
+
 ## Evidence
 
-For each acceptance criterion: the command run and its real output, or a screenshot.
+For each acceptance criterion: the command run and its real output, or a screenshot. Link the workflow run and the commit SHA it ran on.
 
 ## Scope added
 
