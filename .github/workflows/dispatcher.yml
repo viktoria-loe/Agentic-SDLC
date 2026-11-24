@@ -1,0 +1,59 @@
+# Sends a ready agent ticket to the Copilot cloud agent. When an issue gets
+# status:ready and also has route:agent (and is not a type:feature parent),
+# it assigns Copilot and moves the ticket to status:in-progress.
+#
+# Assigning Copilot needs a user token, so that one step uses the
+# COPILOT_ASSIGN_TOKEN fine-grained PAT: Copilot works as the token's owner.
+# Everything else uses the job's own short-lived token.
+name: Dispatcher
+
+on:
+  issues:
+    types: [ labeled ]
+
+permissions:
+  issues: write
+
+# This workflow acts, so runs for the same ticket queue; none is cancelled
+# halfway through.
+concurrency:
+  group: dispatch-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.label.name == 'status:ready' &&
+      contains(github.event.issue.labels.*.name, 'route:agent') &&
+      !contains(github.event.issue.labels.*.name, 'type:feature')
+    runs-on: ubuntu-latest
+    env:
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ github.event.issue.number }}
+    steps:
+      - name: Assign Copilot
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+        run: |
+          gh api -X POST "repos/$REPO/issues/$ISSUE/assignees" --input - <<EOF
+          {"assignees": ["copilot-swe-agent[bot]"],
+           "agent_assignment": {"target_repo": "$REPO", "base_branch": "master"}}
+          EOF
+
+      # The assignees API silently ignores assignees it cannot add, so a
+      # missing or expired token would otherwise look like success.
+      - name: Check Copilot was assigned
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          logins=$(gh api "repos/$REPO/issues/$ISSUE" --jq '[.assignees[].login] | join(",")')
+          echo "Assignees: $logins"
+          case "$logins" in
+            *Copilot*|*copilot*) ;;
+            *) echo "::error::Copilot was not assigned"; exit 1 ;;
+          esac
+
+      - name: Move to in-progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue edit "$ISSUE" --repo "$REPO" --remove-label "status:ready" --add-label "status:in-progress"
