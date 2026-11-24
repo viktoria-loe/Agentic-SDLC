@@ -1,0 +1,17 @@
+# Security updates are controlled in repository settings, not this file.
+# Add the product's ecosystem to updates once its stack is chosen.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - "track:factory"
+    commit-message:
+      prefix: "deps(actions)"
