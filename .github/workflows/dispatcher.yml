@@ -14,10 +14,12 @@ on:
 permissions:
   issues: write
 
-# This workflow acts, so runs for the same ticket queue; none is cancelled
-# halfway through.
+# This workflow acts, so runs queue; none is cancelled halfway through. A newer
+# waiting run still replaces an older waiting one, so the group includes the
+# label: other labels added at the same moment get their own queue and cannot
+# replace a waiting status:ready run.
 concurrency:
-  group: dispatch-${{ github.event.issue.number }}
+  group: dispatch-${{ github.event.issue.number }}-${{ github.event.label.name }}
   cancel-in-progress: false
 
 jobs:
@@ -31,7 +33,23 @@ jobs:
       REPO: ${{ github.repository }}
       ISSUE: ${{ github.event.issue.number }}
     steps:
+      # The event is a snapshot from when the label was added. Read the ticket
+      # as it is now, so a repeated status:ready never dispatches it twice.
+      - name: Check the ticket still needs dispatching
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state=$(gh api "repos/$REPO/issues/$ISSUE" --jq '{labels: [.labels[].name], assignees: [.assignees[].login]}')
+          echo "Now: $state"
+          if echo "$state" | jq -e '(.labels | index("status:ready")) and ([.assignees[] | ascii_downcase | contains("copilot")] | any | not)' > /dev/null; then
+            echo "dispatch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Already dispatched, or no longer status:ready: nothing to do."
+          fi
+
       - name: Assign Copilot
+        if: steps.current.outputs.dispatch == 'true'
         env:
           GH_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
         run: |
@@ -43,6 +61,7 @@ jobs:
       # The assignees API silently ignores assignees it cannot add, so a
       # missing or expired token would otherwise look like success.
       - name: Check Copilot was assigned
+        if: steps.current.outputs.dispatch == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -54,6 +73,7 @@ jobs:
           esac
 
       - name: Move to in-progress
+        if: steps.current.outputs.dispatch == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$ISSUE" --repo "$REPO" --remove-label "status:ready" --add-label "status:in-progress"
