@@ -1,0 +1,27 @@
+# Fails a pull request that adds or upgrades a dependency with a known
+# vulnerability of moderate severity or higher. Required by the master ruleset,
+# so it always runs: no path filters, or pull requests outside them would wait
+# forever for this check. Renaming the job renames the required check.
+name: Dependency review
+
+on:
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: moderate
