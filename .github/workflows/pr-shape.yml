@@ -1,0 +1,51 @@
+# Fails a pull request whose Goals checklist is empty or has unticked items,
+# or whose Evidence section is empty or still the template's hint. It checks
+# that evidence is there, not that it is true: that is review's job.
+# Required by the master ruleset; renaming the job renames the required check.
+# The body is untrusted input: it is read as data in github-script, never
+# pasted into a shell command with ${{ }}.
+name: PR shape
+
+on:
+  pull_request:
+    branches: [ master ]
+    # edited: the body changed. synchronize: new commits, so the new head
+    # commit needs its own result. ready_for_review: a draft became real.
+    types: [ opened, edited, synchronize, reopened, ready_for_review ]
+
+permissions: {}
+
+concurrency:
+  group: pr-shape-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-shape:
+    # Drafts are still being written; Dependabot's pull requests do not use our
+    # template. A job skipped here counts as passed.
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const body = context.payload.pull_request.body ?? '';
+
+            // Split the body into sections by their "## " headings.
+            const sections = {};
+            for (const part of body.split(/^## /m).slice(1)) {
+              const [heading, ...rest] = part.split('\n');
+              sections[heading.trim()] = rest.join('\n').trim();
+            }
+
+            const goals = sections['Goals'] ?? '';
+            const evidence = sections['Evidence'] ?? '';
+            const problems = [];
+
+            if (!/^- \[[ xX]\]/m.test(goals)) problems.push('Goals has no checklist items.');
+            if (/^- \[ \]/m.test(goals)) problems.push('Goals has unticked items.');
+            if (!evidence || evidence.startsWith('For each acceptance criterion'))
+              problems.push('Evidence is empty or still the template text.');
+
+            if (problems.length) core.setFailed(problems.join('\n'));
+            else core.info('Goals are all ticked and Evidence is filled in.');
