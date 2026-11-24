@@ -20,11 +20,14 @@ $labels = @(
     # Stage: exactly one per open ticket
     @{ Name = "status:triage";         Color = "C5DEF5"; Description = "Filed; no person has reviewed it yet" }
     @{ Name = "status:needs-grilling"; Color = "C5DEF5"; Description = "Needs a planning session before it can be built" }
-    @{ Name = "status:spike";          Color = "C5DEF5"; Description = "Exploration only; its pull request never merges" }
     @{ Name = "status:ready";          Color = "0E8A16"; Description = "Planned and routed; can be started" }
     @{ Name = "status:in-progress";    Color = "FBCA04"; Description = "Someone is building it" }
     @{ Name = "status:blocked";        Color = "D93F0B"; Description = "Stopped; needs a decision from a person" }
     @{ Name = "status:in-review";      Color = "BFDADC"; Description = "Its pull request is in review" }
+
+    # Type: what kind of ticket it is, separate from its stage
+    @{ Name = "type:feature";          Color = "0052CC"; Description = "Parent issue for a planned feature; its sub-issues are built, not it" }
+    @{ Name = "type:spike";            Color = "D4C5F9"; Description = "Exploration only; its pull request never merges" }
 
     # Track and risk
     @{ Name = "track:product";         Color = "C2E0C6"; Description = "Work on the product" }
