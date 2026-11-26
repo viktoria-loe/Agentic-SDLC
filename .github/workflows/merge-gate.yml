@@ -52,10 +52,11 @@ jobs:
 
             // Paths that always need a person, whatever the policy says.
             const HARD_LIMITS = ['.github/**', '.claude/**', 'AGENTS.md', 'CLAUDE.md'];
-            const glob = g => new RegExp('^' + g.split('**').map(part =>
+            // Not called "glob": github-script already defines that name.
+            const pathPattern = g => new RegExp('^' + g.split('**').map(part =>
               part.split('*').map(s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*') + '$');
-            const hard = HARD_LIMITS.map(glob);
-            const human = (policy.require_human_paths ?? []).map(glob);
+            const hard = HARD_LIMITS.map(pathPattern);
+            const human = (policy.require_human_paths ?? []).map(pathPattern);
 
             const { owner, repo } = context.repo;
             const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', base: 'master' });
