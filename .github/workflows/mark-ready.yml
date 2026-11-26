@@ -70,7 +70,11 @@ jobs:
             done
           done
 
+  # After mark-ready, so a pull request it has just marked ready is seen as
+  # ready here; and even if mark-ready failed.
   release-checks:
+    needs: mark-ready
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Get App token
@@ -88,10 +92,19 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
-          gh pr list --repo "$REPO" --state open --json number,headRefName,headRefOid,baseRefName \
-            --jq '.[] | select(.headRefName | startswith("copilot/")) | "\(.number) \(.headRefOid) \(.baseRefName)"' |
+          # Drafts are left alone: Copilot is still working, and pr-shape
+          # skips drafts anyway.
+          gh pr list --repo "$REPO" --state open --json number,headRefName,headRefOid,baseRefName,isDraft \
+            --jq '.[] | select((.headRefName | startswith("copilot/")) and (.isDraft | not)) | "\(.number) \(.headRefOid) \(.baseRefName)"' |
           while read -r pr sha base; do
-            runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&status=action_required" --jq '.workflow_runs[].id')
+            # A re-run replays its original event, so a run from a draft-time
+            # push would replay "draft" and skip, and a skipped result counts
+            # as a pass. Re-run a waiting run only if its workflow has no other
+            # run on this commit, so a replay can never sit on top of a real
+            # result.
+            runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha" --paginate --jq '.workflow_runs[] | "\(.workflow_id) \(.id) \(.conclusion)"' |
+              awk '{ total[$1]++; if ($3 == "action_required") waiting[$1] = waiting[$1] " " $2 }
+                   END { for (w in waiting) if (total[w] == split(waiting[w], a, " ")) print waiting[w] }')
             [ -n "$runs" ] || continue
 
             # The diff at this exact commit, so a later push cannot slip in
