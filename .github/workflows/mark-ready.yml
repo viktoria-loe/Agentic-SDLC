@@ -38,6 +38,10 @@ jobs:
           private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
           permission-pull-requests: write
           permission-issues: write
+          # markPullRequestReadyForReview is refused without it ("Resource not
+          # accessible by integration"), although it changes no code. Safe
+          # here: this job never checks out or runs pull request code.
+          permission-contents: write
 
       - name: Mark finished Copilot drafts ready
         env:
