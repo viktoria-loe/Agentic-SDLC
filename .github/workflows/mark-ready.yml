@@ -1,0 +1,59 @@
+# Marks the Copilot cloud agent's finished drafts ready for review, and moves
+# their tickets from status:in-progress to status:in-review. Copilot always
+# leaves its pull request as a draft and cannot mark it ready itself.
+#
+# There is no "Copilot finished" trigger, so this looks for the
+# copilot_work_finished timeline event: after each Copilot session, and every
+# 15 minutes as a backstop. It is safe to run any number of times.
+#
+# It uses the factory App token, never github.token: events caused by
+# github.token start no workflows, so pr-shape would not run on
+# ready_for_review and its skipped draft result would stand as a pass.
+name: Mark ready
+
+on:
+  workflow_run:
+    workflows: [ "Copilot cloud agent" ]
+    types: [ completed ]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# Each run handles every Copilot draft, so runs queue in one group.
+concurrency:
+  group: mark-ready
+  cancel-in-progress: false
+
+jobs:
+  mark-ready:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.FACTORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Mark finished Copilot drafts ready
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr list --repo "$REPO" --state open --draft --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("copilot/")) | .number' |
+          while read -r pr; do
+            last=$(gh api "repos/$REPO/issues/$pr/timeline" --paginate \
+              --jq '.[] | select(.event=="copilot_work_started" or .event=="copilot_work_finished") | .event' | tail -n 1)
+            echo "PR #$pr: last Copilot event is ${last:-none}"
+            [ "$last" = "copilot_work_finished" ] || continue
+
+            gh pr ready "$pr" --repo "$REPO"
+            for issue in $(gh pr view "$pr" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number'); do
+              gh issue edit "$issue" --repo "$REPO" --remove-label "status:in-progress" --add-label "status:in-review"
+            done
+          done
