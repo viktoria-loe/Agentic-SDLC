@@ -9,6 +9,14 @@
 # It uses the factory App token, never github.token: events caused by
 # github.token start no workflows, so pr-shape would not run on
 # ready_for_review and its skipped draft result would stand as a pass.
+#
+# It also releases the checks that wait on Copilot's pull requests. Workflow
+# runs from Copilot's pushes wait for "Approve and run workflows", and the
+# approve API only takes fork pull requests, so the App re-runs them instead.
+# It does this only when the pull request changes nothing under .github/:
+# then the workflows that run are exactly master's. Otherwise it adds
+# needs-person and a person approves after reading the change. This relies on
+# a rule for every workflow: a job that runs pull request code gets no secrets.
 name: Mark ready
 
 on:
@@ -59,5 +67,45 @@ jobs:
             gh pr ready "$pr" --repo "$REPO"
             for issue in $(gh pr view "$pr" --repo "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number'); do
               gh issue edit "$issue" --repo "$REPO" --remove-label "status:in-progress" --add-label "status:in-review"
+            done
+          done
+
+  release-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.FACTORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          permission-actions: write          # to re-run the waiting runs
+          permission-pull-requests: write    # to add needs-person
+          permission-issues: write
+
+      - name: Re-run waiting checks on Copilot pull requests outside .github/
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr list --repo "$REPO" --state open --json number,headRefName,headRefOid,baseRefName \
+            --jq '.[] | select(.headRefName | startswith("copilot/")) | "\(.number) \(.headRefOid) \(.baseRefName)"' |
+          while read -r pr sha base; do
+            runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&status=action_required" --jq '.workflow_runs[].id')
+            [ -n "$runs" ] || continue
+
+            # The diff at this exact commit, so a later push cannot slip in
+            # between the check and the re-run.
+            factory_files=$(gh api "repos/$REPO/compare/$base...$sha" --jq '.files[].filename | select(startswith(".github/"))')
+            if [ -n "$factory_files" ]; then
+              echo "PR #$pr changes factory files; leaving its runs for a person:"
+              echo "$factory_files"
+              gh pr edit "$pr" --repo "$REPO" --add-label "needs-person"
+              continue
+            fi
+
+            for run in $runs; do
+              echo "PR #$pr: re-running waiting run $run on $sha"
+              gh api -X POST "repos/$REPO/actions/runs/$run/rerun" > /dev/null
             done
           done
