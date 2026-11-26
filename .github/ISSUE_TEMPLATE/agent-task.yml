@@ -1,6 +1,7 @@
 name: Agent task
 description: One ticket that an agent or a person can build in a single pull request.
 title: "[task] "
+labels: ["status:triage"]
 body:
   - type: markdown
     attributes:
