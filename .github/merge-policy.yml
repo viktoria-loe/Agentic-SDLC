@@ -2,7 +2,7 @@
 # Hard limits (workflows, factory files, infrastructure, auth, security, migrations, dependency manifests,
 # open security findings, the size cap, the hold label) always need a person and are not set here.
 
-mode: suggest           # off | suggest | auto; auto waits for the review workflow
+mode: auto              # off | suggest | auto
 max_changed_lines: 400  # larger pull requests need a person
 require_human_paths:
   - docs/architecture/**
