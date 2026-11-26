@@ -31,7 +31,7 @@ These are factory files. Propose a change in an issue instead.
 - Everything under `.github/`: workflows, `merge-policy.yml`, `CODEOWNERS`, `dependabot.yml`, the issue and pull request templates, and review instructions
 - `.github/skills/`: synced from the shared skills repository and overwritten on every sync
 
-A pull request that touches any of these always goes to a person, and Copilot's checks on it wait for a person to approve them.
+A pull request that touches any of these always goes to a person to merge. If a Copilot pull request changes anything under `.github/`, its checks also wait for a person to approve them.
 
 ## Review
 
