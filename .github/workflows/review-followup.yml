@@ -41,8 +41,11 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository &&
       startsWith(github.event.workflow_run.head_branch, 'copilot/')
     runs-on: ubuntu-latest
+    permissions:
+      actions: write # start copilot-watch.yml; everything else uses COPILOT_ASSIGN_TOKEN
     steps:
       - name: Ask Copilot when the review needs changes
+        id: ask
         uses: actions/github-script@v9
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -112,4 +115,13 @@ jobs:
               marker,
             ].join('\n');
             await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            core.setOutput('asked', 'true');
             core.info(`Asked Copilot on #${pr.number} (round ${round}, ${threads.length} open threads).`);
+
+      # GitHub runs mark-ready's schedule hours late, so watch for Copilot's fix and
+      # start mark-ready then; it releases the held checks on Copilot's push.
+      - name: Watch for Copilot to finish
+        if: steps.ask.outputs.asked == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run copilot-watch.yml --repo "$GITHUB_REPOSITORY" --ref master

@@ -15,11 +15,20 @@
 # mode it approves and merges nothing.
 #
 # Never trigger this on pull_request or pull_request_review: those run the
-# pull request's own copy of this file, which could approve itself. Schedule
-# and workflow_dispatch run master's copy, and the job refuses any other ref.
+# pull request's own copy of this file, which could approve itself. Schedule,
+# workflow_dispatch and workflow_run run master's copy, and the job refuses any
+# other ref.
+#
+# When it runs: whenever the Review, Dependency review or PR shape workflow
+# finishes, so a pull request is judged as soon as its checks and review are
+# in; when merge-gate-wake.yml starts it as a hold ends; and on the schedule,
+# which GitHub runs hours late here, as a safety net.
 name: Merge gate
 
 on:
+  workflow_run:
+    workflows: [ Review, Dependency review, PR shape ]
+    types: [ completed ]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -30,6 +39,7 @@ permissions:
   issues: write         # the needs-person label
   checks: read
   statuses: read
+  actions: write        # start merge-gate-wake.yml when a hold starts
 
 # The gate acts, so runs queue; none is cut off halfway.
 concurrency:
@@ -97,6 +107,7 @@ jobs:
 
             const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', base: 'master' });
             const toMerge = [];  // tier 0 and ready: handed to the next step
+            const wakes = [];    // holds that just started: merge-gate-wake.yml starts the gate when each ends
 
             for (const pr of prs) {
               if (pr.draft) continue;
@@ -203,7 +214,12 @@ jobs:
                 const who = (policy.hold_notify ?? []).map(name => `@${name}`).join(' ');
                 await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body:
                   `${who ? who + ': t' : 'T'}he factory will approve and merge this pull request after ${mergeAfter}. ` +
-                  'Checks are green, the review passed and no thread is open. Add the `hold` label to stop it.\n\n' + holdNotice });
+                  (synced
+                    ? `Checks are green and its files are exactly the shared skills at \`stable\`. `
+                    : 'Checks are green, the review passed and no thread is open. ') +
+                  'Add the `hold` label to stop it.\n\n' + holdNotice });
+                // The schedule runs hours late, so ask merge-gate-wake.yml to start the gate as the hold ends.
+                wakes.push({ pr: pr.number, seconds: Math.ceil((holdEnds - Date.now()) / 1000) + 60 });
               }
               if (Date.now() < holdEnds) waits.push(`the hold, until ${mergeAfter}`);
 
@@ -231,6 +247,18 @@ jobs:
               core.info(`#${pr.number}: tier ${tier}${tier ? ' (' + reasons.join('; ') + ')' : ready ? ', ready' : ' (waiting: ' + waits.join('; ') + ')'}`);
             }
             core.setOutput('merge', JSON.stringify(toMerge));
+            core.setOutput('wakes', JSON.stringify(wakes));
+
+      - name: Start a wake for each hold that just started
+        if: steps.decide.outputs.wakes != '' && steps.decide.outputs.wakes != '[]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WAKES: ${{ steps.decide.outputs.wakes }}
+        run: |
+          echo "$WAKES" | jq -r '.[] | "\(.pr) \(.seconds)"' | while read -r pr seconds; do
+            gh workflow run merge-gate-wake.yml --repo "$GITHUB_REPOSITORY" --ref master -f pr="$pr" -f seconds="$seconds"
+            echo "Wake for #$pr in ${seconds}s"
+          done
 
       # Only this step holds the App token, and only when there is something to merge.
       - name: Get App token
