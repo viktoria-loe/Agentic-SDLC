@@ -6,8 +6,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Write this so an agent could build it without asking. If it does not fit one pull request, split it first.
-        The route label (`route:agent` or `route:human`) decides who starts it; the field below only records the suggestion.
+        The ticket holds the plan for this piece of work: write it so an agent could build it without asking. If it does not fit one pull request, split it first.
+        The route, risk and track labels decide what happens to it, and a person sets them at triage; the suggestions below only help that person decide.
   - type: textarea
     id: problem
     attributes:
@@ -42,14 +42,14 @@ body:
     validations:
       required: true
   - type: input
-    id: plan
+    id: feature
     attributes:
-      label: Plan
-      description: Link to the section of the plan in docs/plans/ this ticket comes from.
+      label: Feature
+      description: The feature issue this ticket belongs to, if any, for example #12.
   - type: dropdown
     id: risk
     attributes:
-      label: Risk tier
+      label: Suggested risk tier
       options:
         - Low
         - Medium
@@ -63,6 +63,15 @@ body:
       options:
         - Agent
         - Human
+    validations:
+      required: true
+  - type: dropdown
+    id: track
+    attributes:
+      label: Suggested track
+      options:
+        - Product
+        - Factory
     validations:
       required: true
   - type: textarea
