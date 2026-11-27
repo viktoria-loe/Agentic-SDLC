@@ -7,3 +7,4 @@ max_changed_lines: 400  # larger pull requests need a person
 require_human_paths:
   - docs/architecture/**
 hold_minutes: 30        # time for a person to add the hold label before an auto-merge
+copilot_fix_timeout_hours: 24  # Copilot was asked to fix a review and has not pushed: a person looks
