@@ -24,8 +24,11 @@
 # - Untrusted text reaches shell steps only through files and environment
 #   variables, never through ${{ }} inside run:.
 #
-# The review is posted as a "Comment" review by github-actions[bot]; the merge
-# gate trusts a verdict line only from that author.
+# The review is posted as one "Comment" review per round by the reviewer App
+# (its login is the REVIEWER_APP_SLUG variable), which is not the App that
+# approves and merges. The merge gate trusts a verdict line only from it. The
+# current state is also kept in a "Review status" section at the top of the pull
+# request description, so a reader need not scroll through every round.
 #
 # On Copilot's pull requests this run waits for approval like our other
 # workflows; mark-ready's release-checks re-runs it when no .github/ file changed.
@@ -76,6 +79,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          REVIEWER: ${{ vars.REVIEWER_APP_SLUG }} # the reviewer App's login, without [bot]
         run: |
           mkdir -p out
           gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body \
@@ -96,14 +100,14 @@ jobs:
                 reviews(last: 100) { nodes { author { login } body } }
               } } }' > pr-state.json
           # Only the reviewer's own unresolved threads.
-          jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+          jq --arg reviewer "$REVIEWER" '[.data.repository.pullRequest.reviewThreads.nodes[]
                 | select(.isResolved | not)
-                | select(.comments.nodes[0].author.login == "github-actions")
+                | select(.comments.nodes[0].author.login == $reviewer)
                 | {id, path, line: (.line // .originalLine), finding: .comments.nodes[0].body}]' \
             pr-state.json > out/open-threads.json
           # The reviewer's last verdict line, if any.
-          jq '[.data.repository.pullRequest.reviews.nodes[]
-                | select(.author.login == "github-actions")
+          jq --arg reviewer "$REVIEWER" '[.data.repository.pullRequest.reviews.nodes[]
+                | select(.author.login == $reviewer)
                 | .body
                 | capture("<!-- review-pr:verdict=(?<verdict>[a-z-]+) sha=(?<sha>[0-9a-f]{40}) round=(?<round>[0-9]+) -->")]
               | last // {}' pr-state.json > last-review.json
@@ -195,30 +199,41 @@ jobs:
           name: review
           path: out/
 
+
   publish:
     needs: review
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write # the review and replies
-      contents: write      # resolving threads: GitHub refuses it with pull-requests alone
-      issues: write        # the needs-person label
+    permissions: {} # everything below uses the reviewer App's token
     steps:
       - uses: actions/download-artifact@v8
         with:
           name: review
 
-      - name: Post the review and resolve fixed threads
+      - name: Get the reviewer App's token
+        id: reviewer
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.REVIEWER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+          permission-pull-requests: write # the review, replies and the status section
+          permission-contents: write      # resolving threads: GitHub refuses it with pull-requests alone
+          permission-issues: write        # the needs-person label
+
+      - name: Post the review, resolve fixed threads and update the status
         uses: actions/github-script@v9
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
+          REVIEWER: ${{ steps.reviewer.outputs.app-slug }}
         with:
+          github-token: ${{ steps.reviewer.outputs.token }}
           script: |
             const fs = require('fs');
             const MAX_FIX_ROUNDS = 3;
             const { owner, repo } = context.repo;
             const pull_number = Number(process.env.PR);
             const head = process.env.HEAD_SHA;
+            const short = head.slice(0, 7);
             const review = JSON.parse(fs.readFileSync('review.json', 'utf8'));
             const open = JSON.parse(fs.readFileSync('open-threads.json', 'utf8'));
             const round = Number(fs.readFileSync('round.txt', 'utf8').trim());
@@ -247,11 +262,14 @@ jobs:
             review.notes = review.notes.map(clean);
             for (const f of review.findings) { f.body = clean(f.body); f.confirmed_by = clean(f.confirmed_by); }
 
-            const text = f => `**[${f.category}]** ${f.body}\n\nConfirmed by: ${f.confirmed_by}\n\n<sub>review-pr, round ${round}</sub>`;
-            const inline = [], fileLevel = [], unplaced = [];
+            // Every finding becomes a thread in this round's single review. One about a
+            // whole file sits on the file's first changed line and says so.
+            const text = (f, whole) => `**[${f.category}]** ${whole ? '_Applies to the whole file._ ' : ''}${f.body}\n\nConfirmed by: ${f.confirmed_by}`;
+            const inline = [], unplaced = [];
             for (const f of review.findings) {
-              if (f.line != null && inDiff.get(f.path)?.has(f.line)) inline.push({ path: f.path, line: f.line, side: 'RIGHT', body: text(f) });
-              else if (inDiff.has(f.path)) fileLevel.push(f);
+              const lines = inDiff.get(f.path);
+              if (f.line != null && lines?.has(f.line)) inline.push({ path: f.path, line: f.line, side: 'RIGHT', body: text(f, false) });
+              else if (lines?.size) inline.push({ path: f.path, line: Math.min(...lines), side: 'RIGHT', body: text(f, true) });
               else unplaced.push(f);
             }
 
@@ -259,26 +277,34 @@ jobs:
             const openIds = new Set(open.map(t => t.id));
             const fixed = [...new Set(review.fixed)].filter(id => openIds.has(id));
             const stillOpen = open.length - fixed.length;
+            const openAfter = stillOpen + inline.length;
 
             // The verdict comes from the findings and threads, not from the agent's word.
             const pass = review.findings.length === 0 && stillOpen === 0;
             const verdict = pass ? 'pass' : 'changes-needed';
             const roundsUsed = !pass && round - 1 >= MAX_FIX_ROUNDS;
 
+            const counts = [
+              review.findings.length ? `${review.findings.length} new thread${review.findings.length > 1 ? 's' : ''}` : 'no new threads',
+              fixed.length ? `${fixed.length} resolved` : null,
+              stillOpen ? `${stillOpen} still open` : null,
+            ].filter(Boolean).join(' · ');
             const lines = [
-              `### Review, round ${round}: ${pass ? 'pass' : 'changes needed'}`,
+              `**Factory review · round ${round} · ${pass ? 'pass' : 'changes needed'}** · ${short}`,
               '',
               review.summary,
               '',
-              `Blocking findings: ${review.findings.length} new. Earlier threads: ${fixed.length} fixed, ${stillOpen} still open.`,
+              counts,
             ];
-            if (unplaced.length) lines.push('', '**Findings outside the changed files**', ...unplaced.map(f => `- ${text(f).replace(/\n\n/g, ' ')}`));
-            if (review.notes.length) lines.push('', '**Notes**', ...review.notes.slice(0, 5).map(x => `- ${x}`));
+            if (unplaced.length) lines.push('', '**Findings outside the changed files**', ...unplaced.map(f => `- ${text(f, false).replace(/\n\n/g, ' ')}`));
             if (roundsUsed) lines.push('', `**${MAX_FIX_ROUNDS} fix rounds used and changes are still needed: a person decides.**`);
-            lines.push('', `<!-- review-pr:verdict=${verdict} sha=${head} round=${round} -->`);
+            if (review.notes.length) lines.push('', `<details><summary>Notes (${Math.min(review.notes.length, 5)})</summary>`, '', ...review.notes.slice(0, 5).map(x => `- ${x}`), '', '</details>');
+            lines.push('',
+              `<!-- review-pr:verdict=${verdict} sha=${head} round=${round} -->`,
+              `<!-- review-pr:counts opened=${inline.length} resolved=${fixed.length} open=${openAfter} -->`);
             const body = lines.join('\n');
 
-            // One review per commit. A comment on a line GitHub will not take fails the
+            // One review per round. A comment on a line GitHub will not take fails the
             // whole review, so then post it again with every finding in the body.
             try {
               await github.rest.pulls.createReview({ owner, repo, pull_number, commit_id: head, event: 'COMMENT', body, comments: inline });
@@ -286,19 +312,53 @@ jobs:
               core.warning(`Inline comments refused (${e.message}); posting them in the review body.`);
               const extra = inline.map(c => `- \`${c.path}:${c.line}\` ${c.body.replace(/\n\n/g, ' ')}`);
               await github.rest.pulls.createReview({ owner, repo, pull_number, commit_id: head, event: 'COMMENT',
-                body: body.replace('<!-- review-pr:', () => ['**Findings**', ...extra, '', '<!-- review-pr:'].join('\n')) });
-            }
-            for (const f of fileLevel) {
-              await github.rest.pulls.createReviewComment({ owner, repo, pull_number, commit_id: head, path: f.path, subject_type: 'file', body: text(f) });
+                body: body.replace('<!-- review-pr:verdict', () => ['**Findings**', ...extra, '', '<!-- review-pr:verdict'].join('\n')) });
             }
 
             // Reply to each fixed thread, then resolve it. The builder never resolves.
             for (const id of fixed) {
               await github.graphql(`mutation($id: ID!, $body: String!) {
                 addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }`,
-                { id, body: `Fixed in ${head.slice(0, 7)}; checked in review round ${round}.` });
+                { id, body: `Fixed in ${short}; checked in review round ${round}.` });
               await github.graphql(`mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }`, { id });
             }
 
             if (roundsUsed) await github.rest.issues.addLabels({ owner, repo, issue_number: pull_number, labels: ['needs-person'] });
-            core.info(`Round ${round}: ${verdict}; ${inline.length} inline, ${fileLevel.length} file-level, ${unplaced.length} in body; resolved ${fixed.length}, ${stillOpen} still open.`);
+
+            // The Review status section at the top of the description: the current state
+            // and one row per round, rebuilt from the reviewer's own reviews.
+            const VERDICT = /<!-- review-pr:verdict=([a-z-]+) sha=([0-9a-f]{40}) round=(\d+) -->/;
+            const COUNTS = /<!-- review-pr:counts opened=(\d+) resolved=(\d+) open=(\d+) -->/;
+            const byRound = new Map();
+            const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number });
+            for (const r of reviews.filter(r => r.user?.login === `${process.env.REVIEWER}[bot]`)) {
+              const v = (r.body ?? '').match(VERDICT);
+              if (!v) continue;
+              const c = (r.body ?? '').match(COUNTS);
+              byRound.set(Number(v[3]), { verdict: v[1], sha: v[2], opened: c ? Number(c[1]) : 0, resolved: c ? Number(c[2]) : 0, open: c ? Number(c[3]) : 0 });
+            }
+            const rows = [...byRound.entries()].sort((a, b) => a[0] - b[0]);
+            const word = v => v === 'pass' ? 'pass' : 'changes needed';
+            const threadText = x => [x.opened ? `${x.opened} opened` : '', x.resolved ? `${x.resolved} resolved` : ''].filter(Boolean).join(', ') || '–';
+            const status = [
+              '<!-- review-status:start -->',
+              `### Review status: ${word(verdict)} · round ${round} · ${short}`,
+              '',
+              pass ? 'No open review threads.' : `${openAfter} open review thread${openAfter === 1 ? '' : 's'}.${roundsUsed ? ' Fix rounds used up: a person decides.' : ''}`,
+              '',
+              '| Round | Commit | Verdict | Threads |',
+              '| --- | --- | --- | --- |',
+              ...rows.map(([r, x]) => `| ${r} | ${x.sha.slice(0, 7)} | ${word(x.verdict)} | ${threadText(x)} |`),
+              '',
+              '<sub>Kept up to date by the factory\'s reviewer. Each round\'s detail is in its review and threads below.</sub>',
+              '<!-- review-status:end -->',
+            ].join('\n');
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const old = pr.body ?? '';
+            const marked = /<!-- review-status:start -->[\s\S]*?<!-- review-status:end -->/;
+            const newBody = marked.test(old) ? old.replace(marked, () => status)
+              : old.includes('<!-- factory-notes:start -->') ? old.replace('<!-- factory-notes:start -->', () => `${status}\n\n<!-- factory-notes:start -->`)
+              : `${old}\n\n${status}`;
+            if (newBody !== old) await github.rest.pulls.update({ owner, repo, pull_number, body: newBody });
+
+            core.info(`Round ${round}: ${verdict}; ${inline.length} new threads, ${unplaced.length} in body; resolved ${fixed.length}, ${openAfter} open.`);

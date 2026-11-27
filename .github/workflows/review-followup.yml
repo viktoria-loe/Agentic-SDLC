@@ -47,6 +47,7 @@ jobs:
         env:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REVIEWER: ${{ vars.REVIEWER_APP_SLUG }} # the reviewer App's login, without [bot]
         with:
           github-token: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
           script: |
@@ -54,6 +55,7 @@ jobs:
             const { owner, repo } = context.repo;
             const head = process.env.HEAD_SHA;
             const skip = why => core.info(`Not asking Copilot: ${why}.`);
+            if (!process.env.REVIEWER) return skip('the REVIEWER_APP_SLUG variable is not set');
 
             const { data: prs } = await github.rest.pulls.list({ owner, repo, state: 'open', head: `${owner}:${process.env.BRANCH}` });
             const pr = prs[0];
@@ -76,7 +78,7 @@ jobs:
             // The reviewer's latest verdict, read the way the merge gate reads it.
             const VERDICT = /<!-- review-pr:verdict=([a-z-]+) sha=([0-9a-f]{40}) round=(\d+) -->/g;
             const latest = p.reviews.nodes
-              .filter(r => r.author?.login === 'github-actions')
+              .filter(r => r.author?.login === process.env.REVIEWER)
               .map(r => [...(r.body ?? '').matchAll(VERDICT)].at(-1))
               .filter(Boolean)
               .at(-1);
@@ -88,7 +90,7 @@ jobs:
             const marker = `<!-- review-pr:asked sha=${head} round=${round} -->`;
             if (p.comments.nodes.some(c => (c.body ?? '').includes(`<!-- review-pr:asked sha=${head}`))) return skip('already asked for this commit');
 
-            const threads = p.reviewThreads.nodes.filter(t => !t.isResolved && t.comments.nodes[0]?.author?.login === 'github-actions');
+            const threads = p.reviewThreads.nodes.filter(t => !t.isResolved && t.comments.nodes[0]?.author?.login === process.env.REVIEWER);
             const firstLine = s => s.split('\n').find(l => l.trim()) ?? '';
             const list = threads.map(t => {
               const c = t.comments.nodes[0];
@@ -96,8 +98,11 @@ jobs:
               return `- \`${where}\`: ${firstLine(c.body).slice(0, 240)} ([thread](${c.url}))`;
             });
 
+            // It has to be posted with a person's token, so say plainly that the factory wrote it.
             const body = [
-              `@copilot The review of ${head.slice(0, 7)} found blocking problems. This is fix round ${round} of ${MAX_FIX_ROUNDS}.`,
+              `> Posted automatically by the factory's review follow-up, fix round ${round} of ${MAX_FIX_ROUNDS}. It uses a person's token only because Copilot takes requests from people with write access.`,
+              '',
+              `@copilot The review of ${head.slice(0, 7)} found blocking problems.`,
               '',
               list.length ? 'Please address each open review thread:' : 'Please address the findings in the latest review.',
               ...list,

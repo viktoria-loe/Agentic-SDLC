@@ -51,6 +51,8 @@ jobs:
       - name: Decide each pull request's tier
         id: decide
         uses: actions/github-script@v9
+        env:
+          REVIEWER: ${{ vars.REVIEWER_APP_SLUG }} # the reviewer App's login, without [bot]
         with:
           script: |
             const fs = require('fs');
@@ -109,11 +111,12 @@ jobs:
               const checks = head.statusCheckRollup?.state ?? 'NONE';
 
               // Our reviewer's latest verdict must be of the head commit and pass. A
-              // verdict line counts only from github-actions[bot], the reviewer's
-              // identity, and only the last one in a review's body.
+              // verdict line counts only from the reviewer App (REVIEWER_APP_SLUG), an
+              // identity no other workflow uses, and only the last one in a review's
+              // body. With the variable unset nothing counts, so everything waits.
               const VERDICT = /<!-- review-pr:verdict=([a-z-]+) sha=([0-9a-f]{40}) round=(\d+) -->/g;
               const verdicts = p.reviews.nodes
-                .filter(r => r.author?.login === 'github-actions')
+                .filter(r => process.env.REVIEWER && r.author?.login === process.env.REVIEWER)
                 .map(r => ({ review: r, m: [...(r.body ?? '').matchAll(VERDICT)].at(-1) }))
                 .filter(v => v.m)
                 .map(v => ({ submittedAt: v.review.submittedAt, commit: v.review.commit?.oid,
