@@ -9,4 +9,5 @@ require_human_paths:
 hold_minutes: 30        # time for a person to add the hold label before an auto-merge
 hold_notify:            # mentioned when a hold starts, so the chance to add `hold` is seen (people or org/team)
   - viktoria-loe
+skills_repository: viktoria-loe/agentic-skills  # a skills sync pull request merges like tier 0 only if it matches this repository's stable
 copilot_fix_timeout_hours: 24  # Copilot was asked to fix a review and has not pushed: a person looks

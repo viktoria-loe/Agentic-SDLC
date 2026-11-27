@@ -70,6 +70,31 @@ jobs:
             const human = (policy.require_human_paths ?? []).map(pathPattern);
 
             const { owner, repo } = context.repo;
+
+            // Is a skills sync pull request exactly the shared skills at stable?
+            async function checkSkillsSync(pr, files) {
+              const shared = policy.skills_repository;
+              if (!shared) return { ok: false, why: 'no skills_repository in the merge policy' };
+              const outside = files.filter(f => !f.filename.startsWith('.github/skills/'));
+              if (outside.length) return { ok: false, why: `it also changes ${outside.map(f => `\`${f.filename}\``).join(', ')}` };
+              const [so, sr] = shared.split('/');
+              const file = await github.rest.repos.getContent({ owner, repo, path: '.github/skills/SKILLS_RELEASE', ref: pr.head.sha }).catch(() => null);
+              const release = file ? Buffer.from(file.data.content, 'base64').toString().trim() : '';
+              const { data: stable } = await github.rest.repos.getBranch({ owner: so, repo: sr, branch: 'stable' });
+              if (release !== stable.commit.sha) return { ok: false, why: `SKILLS_RELEASE is ${release.slice(0, 7) || 'missing'}, stable is ${stable.commit.sha.slice(0, 7)}` };
+              const blobs = async (o, r, sha, prefix) => {
+                const { data } = await github.rest.git.getTree({ owner: o, repo: r, tree_sha: sha, recursive: 'true' });
+                if (data.truncated) throw new Error(`tree of ${o}/${r}@${sha} is too large to compare`);
+                return new Map(data.tree.filter(e => e.type === 'blob' && e.path.startsWith(prefix)).map(e => [e.path.slice(prefix.length), e.sha]));
+              };
+              const want = await blobs(so, sr, release, 'skills/');
+              const have = await blobs(owner, repo, pr.head.sha, '.github/skills/');
+              have.delete('SKILLS_RELEASE');
+              const differ = [...new Set([...want.keys(), ...have.keys()])].filter(path => want.get(path) !== have.get(path));
+              if (differ.length) return { ok: false, why: `.github/skills/ differs from stable at ${differ.slice(0, 5).map(p => `\`${p}\``).join(', ')}` };
+              return { ok: true };
+            }
+
             const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', base: 'master' });
             const toMerge = [];  // tier 0 and ready: handed to the next step
 
@@ -80,7 +105,18 @@ jobs:
 
               // 1. What the pull request changes
               const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number });
+
+              // The skills sync (skills-sync.yml) changes .github/skills/, which is a factory
+              // file. It merges like tier 0 only when its files are exactly the shared
+              // skills at stable: a person approved those by promoting them. The check
+              // compares file contents, not who opened the pull request, so nothing else
+              // pushed to that branch can ride along.
+              const sync = pr.head.ref === 'factory/skills-sync' ? await checkSkillsSync(pr, files) : null;
+              if (sync && !sync.ok) reasons.push(`skills sync: ${sync.why}`);
+              const synced = sync?.ok === true;
+
               for (const f of files) {
+                if (synced && f.filename.startsWith('.github/skills/')) continue;
                 if (hard.some(r => r.test(f.filename))) reasons.push(`factory file \`${f.filename}\``);
                 else if (human.some(r => r.test(f.filename))) reasons.push(`path needs a person: \`${f.filename}\``);
               }
@@ -101,8 +137,10 @@ jobs:
                   } } }`, { owner, repo, n: pr.number });
 
               // Missing information sends the pull request to a person.
+              // A verified skills sync has no ticket and no review: promoting to stable
+              // was the person's decision.
               const tickets = p.closingIssuesReferences.nodes;
-              if (tickets.length === 0) reasons.push('no linked ticket');
+              if (tickets.length === 0 && !synced) reasons.push('no linked ticket');
               for (const t of tickets) {
                 const tl = t.labels.nodes.map(l => l.name);
                 if (tl.includes('type:spike')) reasons.push(`#${t.number} is a spike: spikes never merge`);
@@ -140,7 +178,8 @@ jobs:
 
               const waits = [];
               if (checks !== 'SUCCESS') waits.push(`checks are ${checks}`);
-              if (!latest) waits.push('no review yet');
+              if (synced) { /* the reviewer skips skills sync pull requests */ }
+              else if (!latest) waits.push('no review yet');
               else if (!reviewed) waits.push('the reviewer has not reviewed the latest commit');
               else if (latest.verdict !== 'pass') waits.push(`the review needs changes (round ${latest.round})`);
               if (openThreads) waits.push(`${openThreads} unresolved review thread(s)`);
@@ -155,7 +194,7 @@ jobs:
               const holdNotice = `<!-- merge-gate:hold-notice sha=${head.oid} -->`;
               let noticedAt = p.comments.nodes.filter(c => (c.body ?? '').includes(holdNotice)).at(-1)?.createdAt;
               const readyAt = p.timelineItems.nodes[0]?.createdAt ?? pr.created_at;
-              let since = Math.max(Date.parse(readyAt), reviewed ? Date.parse(latest.submittedAt) : Date.now());
+              let since = Math.max(Date.parse(readyAt), reviewed ? Date.parse(latest.submittedAt) : synced ? 0 : Date.now());
               if (policy.mode === 'auto' && tier === 0 && waits.length === 0 && !noticedAt) noticedAt = new Date().toISOString();
               if (noticedAt) since = Math.max(since, Date.parse(noticedAt));
               const holdEnds = since + policy.hold_minutes * 60000;
