@@ -1,0 +1,110 @@
+# Stage 3 of our reviewer: when a review of a Copilot pull request says
+# "changes needed", ask Copilot to fix the open threads. Copilot pushes, the
+# Review workflow runs again, and this repeats until the review passes or three
+# fix rounds are used, when the pull request goes to a person.
+#
+# Safeguards:
+# - It runs on workflow_run, so GitHub always runs master's copy of this file.
+#   A pull request cannot edit it to misuse the token, as it could a job in
+#   review.yml, which runs on pull_request and so runs the pull request's copy.
+# - It decides from GitHub's live state, never from the Review run's files: the
+#   reviewer's latest verdict for the head commit, the labels, the assignees.
+# - It asks only when: the branch is copilot/ and Copilot is still assigned
+#   (a person who took over gets nothing automatic), the verdict for the head
+#   commit is changes-needed, fix rounds are left, there is no hold or
+#   needs-person label, and the pull request is not a draft.
+# - It asks once per commit: the comment carries a hidden marker, and a second
+#   run for the same commit (a re-run) posts nothing.
+#
+# Copilot acts only on comments from people with write access, so the comment
+# is posted with COPILOT_ASSIGN_TOKEN, the same user token the dispatcher uses.
+# The merge gate sends the pull request to a person if Copilot has not pushed
+# within copilot_fix_timeout_hours of being asked.
+name: Ask Copilot to fix review threads
+
+on:
+  workflow_run:
+    workflows: [ Review ]
+    types: [ completed ]
+
+permissions: {}
+
+concurrency:
+  group: ask-copilot-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  ask:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'copilot/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask Copilot when the review needs changes
+        uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        with:
+          github-token: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          script: |
+            const MAX_FIX_ROUNDS = 3;
+            const { owner, repo } = context.repo;
+            const head = process.env.HEAD_SHA;
+            const skip = why => core.info(`Not asking Copilot: ${why}.`);
+
+            const { data: prs } = await github.rest.pulls.list({ owner, repo, state: 'open', head: `${owner}:${process.env.BRANCH}` });
+            const pr = prs[0];
+            if (!pr) return skip('no open pull request for this branch');
+            if (pr.head.sha !== head) return skip('a newer commit has been pushed');
+            if (pr.draft) return skip('the pull request is a draft');
+            const labels = pr.labels.map(l => l.name);
+            for (const l of ['hold', 'needs-person']) if (labels.includes(l)) return skip(`it has the ${l} label`);
+            if (!pr.assignees.some(a => /copilot/i.test(a.login))) return skip('Copilot is no longer assigned');
+
+            const { repository: { pullRequest: p } } = await github.graphql(`
+              query($owner: String!, $repo: String!, $n: Int!) {
+                repository(owner: $owner, name: $repo) { pullRequest(number: $n) {
+                  reviews(last: 50) { nodes { author { login } body commit { oid } } }
+                  reviewThreads(first: 100) { nodes { isResolved path line
+                    comments(first: 1) { nodes { author { login } body url } } } }
+                  comments(last: 100) { nodes { body } }
+                } } }`, { owner, repo, n: pr.number });
+
+            // The reviewer's latest verdict, read the way the merge gate reads it.
+            const VERDICT = /<!-- review-pr:verdict=([a-z-]+) sha=([0-9a-f]{40}) round=(\d+) -->/g;
+            const latest = p.reviews.nodes
+              .filter(r => r.author?.login === 'github-actions')
+              .map(r => [...(r.body ?? '').matchAll(VERDICT)].at(-1))
+              .filter(Boolean)
+              .at(-1);
+            if (!latest || latest[2] !== head) return skip('no review of the head commit yet');
+            if (latest[1] !== 'changes-needed') return skip(`the review verdict is ${latest[1]}`);
+            const round = Number(latest[3]);
+            if (round - 1 >= MAX_FIX_ROUNDS) return skip(`${MAX_FIX_ROUNDS} fix rounds already used`);
+
+            const marker = `<!-- review-pr:asked sha=${head} round=${round} -->`;
+            if (p.comments.nodes.some(c => (c.body ?? '').includes(`<!-- review-pr:asked sha=${head}`))) return skip('already asked for this commit');
+
+            const threads = p.reviewThreads.nodes.filter(t => !t.isResolved && t.comments.nodes[0]?.author?.login === 'github-actions');
+            const firstLine = s => s.split('\n').find(l => l.trim()) ?? '';
+            const list = threads.map(t => {
+              const c = t.comments.nodes[0];
+              const where = t.line ? `${t.path}:${t.line}` : t.path;
+              return `- \`${where}\`: ${firstLine(c.body).slice(0, 240)} ([thread](${c.url}))`;
+            });
+
+            const body = [
+              `@copilot The review of ${head.slice(0, 7)} found blocking problems. This is fix round ${round} of ${MAX_FIX_ROUNDS}.`,
+              '',
+              list.length ? 'Please address each open review thread:' : 'Please address the findings in the latest review.',
+              ...list,
+              '',
+              'For each thread: fix it, or reply "won\'t fix" with the reason. Do not resolve threads; the reviewer resolves them once the fix checks out. Push your fixes to this branch.',
+              '',
+              marker,
+            ].join('\n');
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            core.info(`Asked Copilot on #${pr.number} (round ${round}, ${threads.length} open threads).`);

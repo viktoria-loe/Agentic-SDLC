@@ -6,7 +6,9 @@
 # In auto mode, a tier 0 pull request is approved and merged by the factory App
 # once every check is green, our reviewer's (review.yml) verdict on the head
 # commit is pass, no review thread is open and the hold has passed. A pull
-# request whose review used three fix rounds goes to a person. The App is not a
+# request whose review used three fix rounds goes to a person, and so does one
+# where Copilot was asked to fix the review and has not pushed within
+# copilot_fix_timeout_hours. The App is not a
 # ruleset bypass actor, so the ruleset still applies to its merge. In suggest
 # mode it approves and merges nothing.
 #
@@ -91,6 +93,7 @@ jobs:
                     timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT], last: 1) { nodes { ... on ReadyForReviewEvent { createdAt } } }
                     reviews(last: 50) { nodes { author { login } body submittedAt commit { oid } } }
                     reviewThreads(first: 100) { nodes { isResolved } }
+                    comments(last: 100) { nodes { body createdAt } }
                   } } }`, { owner, repo, n: pr.number });
 
               // Missing information sends the pull request to a person.
@@ -121,6 +124,14 @@ jobs:
 
               // Three fix rounds with changes still needed: a person decides, for good.
               if (verdicts.some(v => v.verdict !== 'pass' && v.round - 1 >= 3)) reasons.push('three review fix rounds used');
+
+              // Copilot was asked to fix this commit's review (review-followup.yml) and has
+              // not pushed since: after the timeout, a person looks.
+              const asked = p.comments.nodes.filter(c => (c.body ?? '').includes(`<!-- review-pr:asked sha=${head.oid}`)).at(-1);
+              const timeoutHours = policy.copilot_fix_timeout_hours ?? 24;
+              if (asked && Date.now() - Date.parse(asked.createdAt) > timeoutHours * 3600000) {
+                reasons.push(`Copilot was asked to fix the review over ${timeoutHours} hours ago and has not pushed`);
+              }
 
               // The hold runs from GitHub's own timestamps, never the commit date,
               // which whoever pushes can set: ready for review, and the reviewer's
