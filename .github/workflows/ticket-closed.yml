@@ -1,0 +1,38 @@
+# When a ticket closes, it no longer has a stage: remove its status: labels.
+#
+# A ticket closed by its merged pull request already loses status:in-review in
+# the merge gate; this covers every other way a ticket closes (not planned, a
+# duplicate, closed by hand), so a closed ticket never sits in a stage view or
+# the "Needs a person" search. The Project board's Done column comes from
+# GitHub's built-in automation, not from labels.
+#
+# Only GitHub's own issue event and label names are used, so nothing a ticket's
+# author writes reaches a shell.
+name: Ticket closed
+
+on:
+  issues:
+    types: [ closed ]
+
+permissions:
+  issues: write # remove labels
+
+jobs:
+  clear-stage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove the status labels
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const stages = issue.labels.map(l => l.name).filter(name => name.startsWith('status:'));
+            for (const name of stages) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name });
+              } catch (e) {
+                if (e.status !== 404) throw e; // already gone
+              }
+            }
+            core.info(stages.length ? `#${issue.number}: removed ${stages.join(', ')}` : `#${issue.number}: no stage label`);
