@@ -1,9 +1,12 @@
-# Stage 1 of our own reviewer: Copilot CLI reviews each ready pull request
-# against the review-pr skill and posts one summary comment.
+# Our reviewer: Copilot CLI reviews each ready pull request against the
+# review-pr skill and posts one review per commit.
 #
-# It opens no threads and is not a required check, so it cannot block a merge
-# yet; it runs beside Copilot code review so the two can be compared. Stage 2
-# turns blocking findings into threads and lets the merge gate read the verdict.
+# Each blocking finding becomes a review thread. On later commits the reviewer
+# checks only its open threads and the changes since its last review, replies
+# to and resolves the threads that are fixed, and raises new findings only on
+# new changes, so a review cannot keep finding things in code it already passed.
+# The review carries a hidden verdict line that the merge gate reads. After
+# three fix rounds with changes still needed, the pull request goes to a person.
 #
 # Safeguards:
 # - The rubric, AGENTS.md and CLAUDE.md are read from master, never from the
@@ -13,10 +16,16 @@
 #   only read files, so the worst a prompt injection can do is a wrong review.
 # - COPILOT_REVIEW_TOKEN can only spend Copilot requests. It is kept apart from
 #   COPILOT_ASSIGN_TOKEN, which can write to the repository.
-# - Posting the comment is a separate job with its own token; the review job
-#   cannot write to the pull request.
+# - The agent's answer must match a fixed JSON shape, or nothing is posted. The
+#   publish job decides the verdict from the findings and open threads, not
+#   from what the agent says, and resolves only the reviewer's own threads.
+# - Publishing is a separate job with its own token; the review job cannot
+#   write to the pull request, and the publish job never runs the agent.
 # - Untrusted text reaches shell steps only through files and environment
 #   variables, never through ${{ }} inside run:.
+#
+# The review is posted as a "Comment" review by github-actions[bot]; the merge
+# gate trusts a verdict line only from that author.
 #
 # On Copilot's pull requests this run waits for approval like our other
 # workflows; mark-ready's release-checks re-runs it when no .github/ file changed.
@@ -63,13 +72,64 @@ jobs:
             .github/instructions
           persist-credentials: false
 
-      # The reviewer gets no shell, so the workflow hands it the changes as files.
-      - name: Write the diff and commit messages to files
+      - name: Fetch the pull request, its ticket and the reviewer's open threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p out
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body \
+            --jq '"# " + .title + "\n\n" + .body' > pr.md
+          ticket=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json closingIssuesReferences \
+            --jq '.closingIssuesReferences[0].number // empty')
+          if [ -n "$ticket" ]; then
+            gh issue view "$ticket" --repo "$GITHUB_REPOSITORY" --json title,body \
+              --jq '"# " + .title + "\n\n" + .body' > ticket.md
+          else
+            echo "No linked ticket." > ticket.md
+          fi
+          gh api graphql -F owner="${GITHUB_REPOSITORY%/*}" -F repo="${GITHUB_REPOSITORY#*/}" -F n="$PR" -f query='
+            query($owner: String!, $repo: String!, $n: Int!) {
+              repository(owner: $owner, name: $repo) { pullRequest(number: $n) {
+                reviewThreads(first: 100) { nodes { id isResolved path line originalLine
+                  comments(first: 1) { nodes { author { login } body } } } }
+                reviews(last: 100) { nodes { author { login } body } }
+              } } }' > pr-state.json
+          # Only the reviewer's own unresolved threads.
+          jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+                | select(.isResolved | not)
+                | select(.comments.nodes[0].author.login == "github-actions")
+                | {id, path, line: (.line // .originalLine), finding: .comments.nodes[0].body}]' \
+            pr-state.json > out/open-threads.json
+          # The reviewer's last verdict line, if any.
+          jq '[.data.repository.pullRequest.reviews.nodes[]
+                | select(.author.login == "github-actions")
+                | .body
+                | capture("<!-- review-pr:verdict=(?<verdict>[a-z-]+) sha=(?<sha>[0-9a-f]{40}) round=(?<round>[0-9]+) -->")]
+              | last // {}' pr-state.json > last-review.json
+          cp out/open-threads.json open-threads.json
+
+      - name: Work out the round and the changes since the last review
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git diff "$BASE...HEAD" > diff.patch
           git log --format='%h %s%n%n%b' "$BASE..HEAD" > commits.txt
+          last_sha=$(jq -r '.sha // empty' last-review.json)
+          last_round=$(jq -r '.round // 0' last-review.json)
+          if [ -z "$last_sha" ]; then
+            round=1; : > since-last.patch
+          elif [ "$last_sha" = "$HEAD_SHA" ]; then
+            round=$last_round; : > since-last.patch            # the same commit again
+          elif git merge-base --is-ancestor "$last_sha" HEAD 2>/dev/null; then
+            round=$((last_round + 1)); git diff "$last_sha" HEAD > since-last.patch
+          else
+            round=$((last_round + 1)); cp diff.patch since-last.patch   # history rewritten: review it all
+          fi
+          echo "Round $round (last reviewed: ${last_sha:-none})"
+          echo "$round" > round.txt
+          cp diff.patch round.txt out/
 
       # Copilot CLI reads skills and instructions from the working directory, so
       # without this the pull request's own copies would review it. The diff still
@@ -84,22 +144,6 @@ jobs:
             fi
           done
 
-      - name: Fetch the pull request and its ticket
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body \
-            --jq '"# " + .title + "\n\n" + .body' > pr.md
-          ticket=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json closingIssuesReferences \
-            --jq '.closingIssuesReferences[0].number // empty')
-          if [ -n "$ticket" ]; then
-            gh issue view "$ticket" --repo "$GITHUB_REPOSITORY" --json title,body \
-              --jq '"# " + .title + "\n\n" + .body' > ticket.md
-          else
-            echo "No linked ticket." > ticket.md
-          fi
-
       - name: Install Copilot CLI
         run: npm install -g @github/copilot@1.0.116 # pinned; a person bumps it on purpose
 
@@ -110,37 +154,141 @@ jobs:
         # No --allow-tool: in -p mode anything not pre-approved is refused, so the
         # reviewer can read files but cannot run commands or write.
         run: |
-          copilot -p "Use the review-pr skill. The changes are in diff.patch and their commit messages in commits.txt; the changed files are in the working directory. The ticket is in ticket.md and the pull request description in pr.md. Reply with only the skill's output format." \
+          round=$(cat round.txt)
+          copilot -p "Use the review-pr skill. This is review round $round. The inputs are diff.patch, since-last.patch, open-threads.json, commits.txt, ticket.md and pr.md, and the changed files are in the working directory. Reply with only the JSON the skill describes." \
             --model claude-sonnet-5.5 \
             --deny-tool=write \
             --disable-builtin-mcps \
             --no-ask-user \
-            -s > review.md
-          if ! grep -q '^Verdict:' review.md; then
-            echo "::error::The review has no verdict line; not posting it."
-            cat review.md
+            -s > review-raw.txt
+
+      - name: Check the review's shape
+        run: |
+          # Drop a code fence if the agent added one, then check every key and type.
+          grep -v '^```' review-raw.txt > out/review.json || true
+          if ! jq -e '
+                (.verdict | IN("pass", "changes needed")) and
+                (.summary | type == "string") and
+                (.findings | type == "array") and (.fixed | type == "array") and (.notes | type == "array") and
+                all(.findings[]; (.category | IN("criterion", "security", "test", "scope")) and
+                                 (.path | type == "string") and
+                                 (.line == null or (.line | type == "number")) and
+                                 (.body | type == "string") and (.confirmed_by | type == "string")) and
+                all(.fixed[]; type == "string")' out/review.json > /dev/null; then
+            echo "::error::The review does not match the skill's JSON shape; not posting it."
+            cat review-raw.txt
             exit 1
           fi
-          cat review.md >> "$GITHUB_STEP_SUMMARY"
+          jq . out/review.json >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         with:
           name: review
-          path: review.md
+          path: out/
 
-  comment:
+  publish:
     needs: review
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
+      pull-requests: write # the review, replies and resolving threads
+      issues: write        # the needs-person label
     steps:
       - uses: actions/download-artifact@v8
         with:
           name: review
 
-      - name: Post the review
+      - name: Post the review and resolve fixed threads
+        uses: actions/github-script@v9
         env:
-          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR: ${{ github.event.pull_request.number }}
-        # One comment per pull request, updated on each run.
-        run: gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file review.md --edit-last --create-if-none
+        with:
+          script: |
+            const fs = require('fs');
+            const MAX_FIX_ROUNDS = 3;
+            const { owner, repo } = context.repo;
+            const pull_number = Number(process.env.PR);
+            const head = process.env.HEAD_SHA;
+            const review = JSON.parse(fs.readFileSync('review.json', 'utf8'));
+            const open = JSON.parse(fs.readFileSync('open-threads.json', 'utf8'));
+            const round = Number(fs.readFileSync('round.txt', 'utf8').trim());
+
+            // Lines a review comment may sit on: the new side of each diff hunk.
+            const inDiff = new Map();
+            let file = null, n = 0;
+            for (const line of fs.readFileSync('diff.patch', 'utf8').split('\n')) {
+              if (line.startsWith('diff --git')) { file = null; continue; }
+              if (line.startsWith('+++ ')) {
+                file = line === '+++ /dev/null' ? null : line.slice(4).replace(/^b\//, '');
+                if (file && !inDiff.has(file)) inDiff.set(file, new Set());
+                continue;
+              }
+              if (line.startsWith('--- ')) continue;
+              const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+              if (hunk) { n = Number(hunk[1]); continue; }
+              if (!file) continue;
+              if (line.startsWith('+') || line.startsWith(' ')) inDiff.get(file).add(n++);
+            }
+
+            // The agent's words are untrusted: no HTML comments, so it cannot write a
+            // verdict line of its own, and no @mentions, so it cannot ping anyone.
+            const clean = s => String(s).replace(/<!--/g, '&lt;!--').replace(/@(?=\w)/g, '@​');
+            review.summary = clean(review.summary);
+            review.notes = review.notes.map(clean);
+            for (const f of review.findings) { f.body = clean(f.body); f.confirmed_by = clean(f.confirmed_by); }
+
+            const text = f => `**[${f.category}]** ${f.body}\n\nConfirmed by: ${f.confirmed_by}\n\n<sub>review-pr, round ${round}</sub>`;
+            const inline = [], fileLevel = [], unplaced = [];
+            for (const f of review.findings) {
+              if (f.line != null && inDiff.get(f.path)?.has(f.line)) inline.push({ path: f.path, line: f.line, side: 'RIGHT', body: text(f) });
+              else if (inDiff.has(f.path)) fileLevel.push(f);
+              else unplaced.push(f);
+            }
+
+            // Only the reviewer's own open threads can be marked fixed.
+            const openIds = new Set(open.map(t => t.id));
+            const fixed = [...new Set(review.fixed)].filter(id => openIds.has(id));
+            const stillOpen = open.length - fixed.length;
+
+            // The verdict comes from the findings and threads, not from the agent's word.
+            const pass = review.findings.length === 0 && stillOpen === 0;
+            const verdict = pass ? 'pass' : 'changes-needed';
+            const roundsUsed = !pass && round - 1 >= MAX_FIX_ROUNDS;
+
+            const lines = [
+              `### Review, round ${round}: ${pass ? 'pass' : 'changes needed'}`,
+              '',
+              review.summary,
+              '',
+              `Blocking findings: ${review.findings.length} new. Earlier threads: ${fixed.length} fixed, ${stillOpen} still open.`,
+            ];
+            if (unplaced.length) lines.push('', '**Findings outside the changed files**', ...unplaced.map(f => `- ${text(f).replace(/\n\n/g, ' ')}`));
+            if (review.notes.length) lines.push('', '**Notes**', ...review.notes.slice(0, 5).map(x => `- ${x}`));
+            if (roundsUsed) lines.push('', `**${MAX_FIX_ROUNDS} fix rounds used and changes are still needed: a person decides.**`);
+            lines.push('', `<!-- review-pr:verdict=${verdict} sha=${head} round=${round} -->`);
+            const body = lines.join('\n');
+
+            // One review per commit. A comment on a line GitHub will not take fails the
+            // whole review, so then post it again with every finding in the body.
+            try {
+              await github.rest.pulls.createReview({ owner, repo, pull_number, commit_id: head, event: 'COMMENT', body, comments: inline });
+            } catch (e) {
+              core.warning(`Inline comments refused (${e.message}); posting them in the review body.`);
+              const extra = inline.map(c => `- \`${c.path}:${c.line}\` ${c.body.replace(/\n\n/g, ' ')}`);
+              await github.rest.pulls.createReview({ owner, repo, pull_number, commit_id: head, event: 'COMMENT',
+                body: body.replace('<!-- review-pr:', () => ['**Findings**', ...extra, '', '<!-- review-pr:'].join('\n')) });
+            }
+            for (const f of fileLevel) {
+              await github.rest.pulls.createReviewComment({ owner, repo, pull_number, commit_id: head, path: f.path, subject_type: 'file', body: text(f) });
+            }
+
+            // Reply to each fixed thread, then resolve it. The builder never resolves.
+            for (const id of fixed) {
+              await github.graphql(`mutation($id: ID!, $body: String!) {
+                addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }`,
+                { id, body: `Fixed in ${head.slice(0, 7)}; checked in review round ${round}.` });
+              await github.graphql(`mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }`, { id });
+            }
+
+            if (roundsUsed) await github.rest.issues.addLabels({ owner, repo, issue_number: pull_number, labels: ['needs-person'] });
+            core.info(`Round ${round}: ${verdict}; ${inline.length} inline, ${fileLevel.length} file-level, ${unplaced.length} in body; resolved ${fixed.length}, ${stillOpen} still open.`);

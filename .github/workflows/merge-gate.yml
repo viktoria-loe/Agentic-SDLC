@@ -4,8 +4,9 @@
 # adds needs-person for tier 1.
 #
 # In auto mode, a tier 0 pull request is approved and merged by the factory App
-# once every check is green, Copilot's review of the head commit recommends
-# approval, no review thread is open and the hold has passed. The App is not a
+# once every check is green, our reviewer's (review.yml) verdict on the head
+# commit is pass, no review thread is open and the hold has passed. A pull
+# request whose review used three fix rounds goes to a person. The App is not a
 # ruleset bypass actor, so the ruleset still applies to its merge. In suggest
 # mode it approves and merges nothing.
 #
@@ -104,14 +105,25 @@ jobs:
               const head = p.commits.nodes[0].commit;
               const checks = head.statusCheckRollup?.state ?? 'NONE';
 
-              // Copilot's latest review must be of the head commit and recommend approval.
-              const copilot = p.reviews.nodes.filter(r => (r.author?.login ?? '').startsWith('copilot-pull-request-reviewer'));
-              const latest = copilot.at(-1);
-              const reviewed = latest && latest.commit?.oid === head.oid;
+              // Our reviewer's latest verdict must be of the head commit and pass. A
+              // verdict line counts only from github-actions[bot], the reviewer's
+              // identity, and only the last one in a review's body.
+              const VERDICT = /<!-- review-pr:verdict=([a-z-]+) sha=([0-9a-f]{40}) round=(\d+) -->/g;
+              const verdicts = p.reviews.nodes
+                .filter(r => r.author?.login === 'github-actions')
+                .map(r => ({ review: r, m: [...(r.body ?? '').matchAll(VERDICT)].at(-1) }))
+                .filter(v => v.m)
+                .map(v => ({ submittedAt: v.review.submittedAt, commit: v.review.commit?.oid,
+                             verdict: v.m[1], sha: v.m[2], round: Number(v.m[3]) }));
+              const latest = verdicts.at(-1);
+              const reviewed = latest && latest.sha === head.oid && latest.commit === head.oid;
               const openThreads = p.reviewThreads.nodes.filter(t => !t.isResolved).length;
 
+              // Three fix rounds with changes still needed: a person decides, for good.
+              if (verdicts.some(v => v.verdict !== 'pass' && v.round - 1 >= 3)) reasons.push('three review fix rounds used');
+
               // The hold runs from GitHub's own timestamps, never the commit date,
-              // which whoever pushes can set: ready for review, and Copilot's
+              // which whoever pushes can set: ready for review, and the reviewer's
               // review of the head commit, which comes after the last push.
               const readyAt = p.timelineItems.nodes[0]?.createdAt ?? pr.created_at;
               const since = Math.max(Date.parse(readyAt), reviewed ? Date.parse(latest.submittedAt) : Date.now());
@@ -120,9 +132,9 @@ jobs:
 
               const waits = [];
               if (checks !== 'SUCCESS') waits.push(`checks are ${checks}`);
-              if (!latest) waits.push('no Copilot review yet');
-              else if (!reviewed) waits.push('Copilot has not reviewed the latest commit');
-              else if (!/Approval recommended/.test(latest.body)) waits.push('Copilot did not recommend approval');
+              if (!latest) waits.push('no review yet');
+              else if (!reviewed) waits.push('the reviewer has not reviewed the latest commit');
+              else if (latest.verdict !== 'pass') waits.push(`the review needs changes (round ${latest.round})`);
               if (openThreads) waits.push(`${openThreads} unresolved review thread(s)`);
               if (Date.now() < holdEnds) waits.push(`the hold, until ${mergeAfter}`);
 
