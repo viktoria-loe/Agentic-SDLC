@@ -203,7 +203,10 @@ jobs:
                 const who = (policy.hold_notify ?? []).map(name => `@${name}`).join(' ');
                 await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body:
                   `${who ? who + ': t' : 'T'}he factory will approve and merge this pull request after ${mergeAfter}. ` +
-                  'Checks are green, the review passed and no thread is open. Add the `hold` label to stop it.\n\n' + holdNotice });
+                  (synced
+                    ? `Checks are green and its files are exactly the shared skills at \`stable\`. `
+                    : 'Checks are green, the review passed and no thread is open. ') +
+                  'Add the `hold` label to stop it.\n\n' + holdNotice });
               }
               if (Date.now() < holdEnds) waits.push(`the hold, until ${mergeAfter}`);
 
