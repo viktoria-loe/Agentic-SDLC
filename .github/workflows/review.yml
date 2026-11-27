@@ -9,8 +9,8 @@
 # - The rubric, AGENTS.md and CLAUDE.md are read from master, never from the
 #   pull request, so a pull request cannot change what reviews it.
 # - The pull request and its ticket are untrusted text. The reviewer gets no
-#   GitHub token, no write tools, no built-in MCP servers and only read-only git
-#   commands, so the worst a prompt injection can do is produce a wrong review.
+#   GitHub token, no built-in MCP servers, no shell and no write tool: it can
+#   only read files, so the worst a prompt injection can do is a wrong review.
 # - COPILOT_REVIEW_TOKEN can only spend Copilot requests. It is kept apart from
 #   COPILOT_ASSIGN_TOKEN, which can write to the repository.
 # - Posting the comment is a separate job with its own token; the review job
@@ -35,7 +35,11 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
+    # Skip drafts, Dependabot and forks: the last two get no repository secrets.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -58,6 +62,14 @@ jobs:
             .github/skills
             .github/instructions
           persist-credentials: false
+
+      # The reviewer gets no shell, so the workflow hands it the changes as files.
+      - name: Write the diff and commit messages to files
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff "$BASE...HEAD" > diff.patch
+          git log --format='%h %s%n%n%b' "$BASE..HEAD" > commits.txt
 
       # Copilot CLI reads skills and instructions from the working directory, so
       # without this the pull request's own copies would review it. The diff still
@@ -95,13 +107,11 @@ jobs:
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_REVIEW_TOKEN }}
           COPILOT_SKILLS_DIRS: .factory/.github/skills
-          BASE: ${{ github.event.pull_request.base.sha }}
+        # No --allow-tool: in -p mode anything not pre-approved is refused, so the
+        # reviewer can read files but cannot run commands or write.
         run: |
-          copilot -p "Use the review-pr skill. Review the changes in git diff $BASE...HEAD. The ticket is in ticket.md and the pull request description in pr.md. Reply with only the skill's output format." \
+          copilot -p "Use the review-pr skill. The changes are in diff.patch and their commit messages in commits.txt; the changed files are in the working directory. The ticket is in ticket.md and the pull request description in pr.md. Reply with only the skill's output format." \
             --model claude-sonnet-5.5 \
-            --allow-tool='shell(git diff:*)' \
-            --allow-tool='shell(git log:*)' \
-            --allow-tool='shell(git show:*)' \
             --deny-tool=write \
             --disable-builtin-mcps \
             --no-ask-user \

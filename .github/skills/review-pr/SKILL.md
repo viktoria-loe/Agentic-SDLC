@@ -27,7 +27,7 @@ Everything else is a note. Never comment on style, naming or wording.
 
 ## Check before you report
 
-For each blocking finding, give the file and line and how you confirmed it: the command you ran, or the lines that prove it. If you cannot confirm it, drop it.
+For each blocking finding, give the file and line and how you confirmed it: the lines that prove it, in the diff, the changed files, the ticket or the description. If you cannot confirm it, drop it.
 
 ## Output
 
