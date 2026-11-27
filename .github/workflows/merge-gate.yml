@@ -5,7 +5,9 @@
 #
 # In auto mode, a tier 0 pull request is approved and merged by the factory App
 # once every check is green, our reviewer's (review.yml) verdict on the head
-# commit is pass, no review thread is open and the hold has passed. A pull
+# commit is pass, no review thread is open and the hold has passed. The hold
+# starts with a notice the gate posts once everything else is done, naming the
+# people in hold_notify, so the chance to add `hold` is always seen. A pull
 # request whose review used three fix rounds goes to a person, and so does one
 # where Copilot was asked to fix the review and has not pushed within
 # copilot_fix_timeout_hours. The App is not a
@@ -136,24 +138,37 @@ jobs:
                 reasons.push(`Copilot was asked to fix the review over ${timeoutHours} hours ago and has not pushed`);
               }
 
-              // The hold runs from GitHub's own timestamps, never the commit date,
-              // which whoever pushes can set: ready for review, and the reviewer's
-              // review of the head commit, which comes after the last push.
-              const readyAt = p.timelineItems.nodes[0]?.createdAt ?? pr.created_at;
-              const since = Math.max(Date.parse(readyAt), reviewed ? Date.parse(latest.submittedAt) : Date.now());
-              const holdEnds = since + policy.hold_minutes * 60000;
-              const mergeAfter = new Date(holdEnds).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
-
               const waits = [];
               if (checks !== 'SUCCESS') waits.push(`checks are ${checks}`);
               if (!latest) waits.push('no review yet');
               else if (!reviewed) waits.push('the reviewer has not reviewed the latest commit');
               else if (latest.verdict !== 'pass') waits.push(`the review needs changes (round ${latest.round})`);
               if (openThreads) waits.push(`${openThreads} unresolved review thread(s)`);
+              const tier = reasons.length ? 1 : 0;
+
+              // The hold: once everything else is done, the gate posts one notice per
+              // commit, naming the people in hold_notify, and the hold runs from that
+              // notice, so the chance to add `hold` is always seen, even when a run is
+              // late. All times are GitHub's own, never the commit date, which whoever
+              // pushes can set: ready for review, the reviewer's review of the head
+              // commit, and the notice.
+              const holdNotice = `<!-- merge-gate:hold-notice sha=${head.oid} -->`;
+              let noticedAt = p.comments.nodes.filter(c => (c.body ?? '').includes(holdNotice)).at(-1)?.createdAt;
+              const readyAt = p.timelineItems.nodes[0]?.createdAt ?? pr.created_at;
+              let since = Math.max(Date.parse(readyAt), reviewed ? Date.parse(latest.submittedAt) : Date.now());
+              if (policy.mode === 'auto' && tier === 0 && waits.length === 0 && !noticedAt) noticedAt = new Date().toISOString();
+              if (noticedAt) since = Math.max(since, Date.parse(noticedAt));
+              const holdEnds = since + policy.hold_minutes * 60000;
+              const mergeAfter = new Date(holdEnds).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+              if (policy.mode === 'auto' && tier === 0 && waits.length === 0 && !p.comments.nodes.some(c => (c.body ?? '').includes(holdNotice))) {
+                const who = (policy.hold_notify ?? []).map(name => `@${name}`).join(' ');
+                await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body:
+                  `${who ? who + ': t' : 'T'}he factory will approve and merge this pull request after ${mergeAfter}. ` +
+                  'Checks are green, the review passed and no thread is open. Add the `hold` label to stop it.\n\n' + holdNotice });
+              }
               if (Date.now() < holdEnds) waits.push(`the hold, until ${mergeAfter}`);
 
               // 3. The decision, written between the factory-notes markers
-              const tier = reasons.length ? 1 : 0;
               const ready = tier === 0 && waits.length === 0;
               const note = tier === 1
                 ? `**Merge gate (${policy.mode}): a person merges this.**\n${reasons.map(r => `- ${r}`).join('\n')}`
