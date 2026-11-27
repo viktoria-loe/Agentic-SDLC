@@ -47,11 +47,13 @@ concurrency:
 
 jobs:
   review:
-    # Skip drafts, Dependabot and forks: the last two get no repository secrets.
+    # Skip drafts, Dependabot and forks (the last two get no repository secrets),
+    # and the skills sync: the merge gate checks its files are exactly stable.
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref != 'factory/skills-sync'
     runs-on: ubuntu-latest
     permissions:
       contents: read

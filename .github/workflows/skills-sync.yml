@@ -1,0 +1,25 @@
+# Brings the shared skills into .github/skills/ every hour: the reusable sync in
+# viktoria-loe/agentic-skills copies skills/ at stable and opens or updates one
+# pull request on factory/skills-sync. The merge gate merges it after the hold,
+# once it has checked the files are exactly stable (see checkSkillsSync).
+#
+# The token is a user token, so the sync pull request starts this repository's
+# checks; the workflow token's events start none. In the organisation it is the
+# factory's service account. The reusable workflow is pinned to the shared
+# repository's stable branch, which only a person moves.
+name: Skills sync
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    permissions:
+      contents: read
+    uses: viktoria-loe/agentic-skills/.github/workflows/sync.yml@stable
+    secrets:
+      token: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
