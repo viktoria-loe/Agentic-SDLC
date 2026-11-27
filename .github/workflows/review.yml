@@ -155,7 +155,7 @@ jobs:
         # reviewer can read files but cannot run commands or write.
         run: |
           round=$(cat round.txt)
-          copilot -p "Use the review-pr skill. This is review round $round. The inputs are diff.patch, since-last.patch, open-threads.json, commits.txt, ticket.md and pr.md, and the changed files are in the working directory. Reply with only the JSON the skill describes." \
+          copilot -p "Use the review-pr skill. This is review round $round. The inputs are diff.patch, since-last.patch, open-threads.json, commits.txt, ticket.md and pr.md, and the changed files are in the working directory. Your whole reply must be the JSON object the skill describes, with no sentence before or after it." \
             --model claude-sonnet-5.5 \
             --deny-tool=write \
             --disable-builtin-mcps \
@@ -164,8 +164,17 @@ jobs:
 
       - name: Check the review's shape
         run: |
-          # Drop a code fence if the agent added one, then check every key and type.
-          grep -v '^```' review-raw.txt > out/review.json || true
+          # Keep the one JSON object in the reply, ignoring any prose or code fence
+          # around it: try each "{" until the text up to the last "}" parses.
+          # Then check every key and type.
+          node -e '
+            const fs = require("fs");
+            const s = fs.readFileSync("review-raw.txt", "utf8");
+            const end = s.lastIndexOf("}");
+            for (let i = s.indexOf("{"); i >= 0 && i < end; i = s.indexOf("{", i + 1)) {
+              try { fs.writeFileSync("out/review.json", JSON.stringify(JSON.parse(s.slice(i, end + 1)))); process.exit(0); } catch {}
+            }
+            fs.writeFileSync("out/review.json", "");'
           if ! jq -e '
                 (.verdict | IN("pass", "changes needed")) and
                 (.summary | type == "string") and
