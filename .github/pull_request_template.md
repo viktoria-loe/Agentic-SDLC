@@ -1,6 +1,6 @@
 Closes #
 
-Plan: link to the plan section in `docs/plans/` this ticket comes from.
+Feature: the feature issue this ticket belongs to, if any.
 
 ## Goals
 
