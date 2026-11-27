@@ -1,0 +1,116 @@
+# Stage 1 of our own reviewer: Copilot CLI reviews each ready pull request
+# against the review-pr skill and posts one summary comment.
+#
+# It opens no threads and is not a required check, so it cannot block a merge
+# yet; it runs beside Copilot code review so the two can be compared. Stage 2
+# turns blocking findings into threads and lets the merge gate read the verdict.
+#
+# Safeguards:
+# - The rubric is read from master, never from the pull request, so a pull
+#   request cannot change what reviews it.
+# - The pull request and its ticket are untrusted text. The reviewer gets no
+#   GitHub token, no write tools, no built-in MCP servers and only read-only git
+#   commands, so the worst a prompt injection can do is produce a wrong review.
+# - COPILOT_REVIEW_TOKEN can only spend Copilot requests. It is kept apart from
+#   COPILOT_ASSIGN_TOKEN, which can write to the repository.
+# - Posting the comment is a separate job with its own token; the review job
+#   cannot write to the pull request.
+# - Untrusted text reaches shell steps only through files and environment
+#   variables, never through ${{ }} inside run:.
+#
+# On Copilot's pull requests this run waits for approval like our other
+# workflows; mark-ready's release-checks re-runs it when no .github/ file changed.
+name: Review
+
+on:
+  pull_request:
+    branches: [ master ]
+    types: [ opened, ready_for_review, synchronize, reopened ]
+
+permissions: {}
+
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true # a newer commit makes this review stale
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }} # the commit the merge gate checks the review against
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the rubric from master
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          path: .factory
+          sparse-checkout: .github/skills/review-pr
+          persist-credentials: false
+
+      - name: Fetch the pull request and its ticket
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title,body \
+            --jq '"# " + .title + "\n\n" + .body' > pr.md
+          ticket=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json closingIssuesReferences \
+            --jq '.closingIssuesReferences[0].number // empty')
+          if [ -n "$ticket" ]; then
+            gh issue view "$ticket" --repo "$GITHUB_REPOSITORY" --json title,body \
+              --jq '"# " + .title + "\n\n" + .body' > ticket.md
+          else
+            echo "No linked ticket." > ticket.md
+          fi
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot@1.0.116 # pinned; a person bumps it on purpose
+
+      - name: Review
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_REVIEW_TOKEN }}
+          COPILOT_SKILLS_DIRS: .factory/.github/skills
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          copilot -p "Use the review-pr skill. Review the changes in git diff $BASE...HEAD. The ticket is in ticket.md and the pull request description in pr.md. Reply with only the skill's output format." \
+            --model claude-sonnet-5.5 \
+            --allow-tool='shell(git diff:*)' \
+            --allow-tool='shell(git log:*)' \
+            --allow-tool='shell(git show:*)' \
+            --deny-tool=write \
+            --disable-builtin-mcps \
+            --no-ask-user \
+            -s > review.md
+          cat review.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: review
+          path: review.md
+
+  comment:
+    needs: review
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: review
+
+      - name: Post the review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        # One comment per pull request, updated on each run.
+        run: gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file review.md --edit-last --create-if-none
