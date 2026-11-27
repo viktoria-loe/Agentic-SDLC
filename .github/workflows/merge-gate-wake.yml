@@ -1,0 +1,47 @@
+# Starts the merge gate when a hold ends. GitHub runs this repository's
+# scheduled workflows hours late (the */15 merge gate ran at 19:58, 02:44 and
+# 11:27 on 26-27 November), so the gate cannot rely on its schedule to see a
+# hold end. When the gate posts a hold notice it starts this with the seconds
+# left; this waits, then starts the gate. A workflow_dispatch made with the
+# workflow token does start a run, unlike other events from that token.
+#
+# One wake per pull request: a newer one (a new commit's notice) replaces an
+# older one. Waiting costs runner time: free on a public repository, billed
+# minutes on a private one.
+name: Merge gate wake
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The pull request whose hold is running
+        required: true
+      seconds:
+        description: How long to wait before starting the merge gate
+        required: true
+
+permissions:
+  actions: write # start the merge gate
+
+concurrency:
+  group: merge-gate-wake-${{ inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  wake:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Wait for the hold, then start the merge gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          SECONDS_LEFT: ${{ inputs.seconds }}
+        run: |
+          case "$SECONDS_LEFT" in ''|*[!0-9]*) echo "::error::seconds must be a whole number"; exit 1;; esac
+          wait=$(( SECONDS_LEFT > 21000 ? 21000 : SECONDS_LEFT ))
+          echo "Waiting ${wait}s for the hold on #$PR"
+          sleep "$wait"
+          gh workflow run merge-gate.yml --repo "$GITHUB_REPOSITORY" --ref master
+          echo "Started the merge gate for #$PR"

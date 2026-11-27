@@ -13,6 +13,7 @@ on:
 
 permissions:
   issues: write
+  actions: write # start copilot-watch.yml
 
 # This workflow acts, so runs queue; none is cancelled halfway through. A newer
 # waiting run still replaces an older waiting one, so the group includes the
@@ -77,3 +78,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh issue edit "$ISSUE" --repo "$REPO" --remove-label "status:ready" --add-label "status:in-progress"
+
+      # GitHub runs mark-ready's schedule hours late and holds its other trigger,
+      # so watch for Copilot to finish and start mark-ready then.
+      - name: Watch for Copilot to finish
+        if: steps.current.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run copilot-watch.yml --repo "$REPO" --ref master

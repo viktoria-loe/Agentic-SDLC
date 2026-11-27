@@ -1,0 +1,54 @@
+# Watches for Copilot to finish, then starts mark-ready. GitHub runs this
+# repository's scheduled workflows hours late, and mark-ready's own trigger
+# (the Copilot cloud agent run completing) is held for approval like every run
+# Copilot's activity starts. The dispatcher starts this when it assigns Copilot,
+# and the review follow-up when it asks Copilot for fixes.
+#
+# Every two minutes, for up to `minutes`, it looks for an open copilot/ pull
+# request whose latest Copilot event is "finished" and newer than this run's
+# start; then it starts mark-ready, which marks the draft ready and releases
+# the held checks. Waiting costs runner time: free on a public repository,
+# billed minutes on a private one. mark-ready's schedule stays as a safety net.
+name: Copilot watch
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: How long to watch
+        default: "90"
+
+permissions:
+  actions: write       # start mark-ready
+  pull-requests: read
+  issues: read         # the pull request timeline
+
+jobs:
+  watch:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Wait for Copilot to finish, then start mark-ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          case "$MINUTES" in ''|*[!0-9]*) echo "::error::minutes must be a whole number"; exit 1;; esac
+          since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          end=$(( $(date +%s) + (MINUTES > 170 ? 170 : MINUTES) * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            sleep 120
+            for pr in $(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName \
+                          --jq '.[] | select(.headRefName | startswith("copilot/")) | .number'); do
+              last=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/timeline" --paginate \
+                       --jq '.[] | select(.event=="copilot_work_started" or .event=="copilot_work_finished") | "\(.event) \(.created_at)"' | tail -n 1)
+              event=${last%% *}; at=${last##* }
+              if [ "$event" = "copilot_work_finished" ] && [[ "$at" > "$since" ]]; then
+                gh workflow run mark-ready.yml --repo "$GITHUB_REPOSITORY" --ref master
+                echo "Copilot finished on #$pr at $at; started mark-ready."
+                exit 0
+              fi
+            done
+          done
+          echo "Copilot did not finish within $MINUTES minutes; mark-ready's schedule will catch it."
