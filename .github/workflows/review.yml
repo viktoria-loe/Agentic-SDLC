@@ -6,8 +6,8 @@
 # turns blocking findings into threads and lets the merge gate read the verdict.
 #
 # Safeguards:
-# - The rubric is read from master, never from the pull request, so a pull
-#   request cannot change what reviews it.
+# - The rubric, AGENTS.md and CLAUDE.md are read from master, never from the
+#   pull request, so a pull request cannot change what reviews it.
 # - The pull request and its ticket are untrusted text. The reviewer gets no
 #   GitHub token, no write tools, no built-in MCP servers and only read-only git
 #   commands, so the worst a prompt injection can do is produce a wrong review.
@@ -49,13 +49,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check out the rubric from master
+      - name: Check out the rubric and instructions from master
         uses: actions/checkout@v7
         with:
           ref: master
           path: .factory
-          sparse-checkout: .github/skills/review-pr
+          sparse-checkout: |
+            .github/skills
+            .github/instructions
           persist-credentials: false
+
+      # Copilot CLI reads skills and instructions from the working directory, so
+      # without this the pull request's own copies would review it. The diff still
+      # shows any change to them, as data.
+      - name: Use master's skills and instructions, not the pull request's
+        run: |
+          rm -rf .github/skills .github/instructions .github/copilot-instructions.md AGENTS.md CLAUDE.md
+          for path in .github/skills .github/instructions .github/copilot-instructions.md AGENTS.md CLAUDE.md; do
+            if [ -e ".factory/$path" ]; then
+              mkdir -p "$(dirname "$path")"
+              cp -r ".factory/$path" "$path"
+            fi
+          done
 
       - name: Fetch the pull request and its ticket
         env:
@@ -91,6 +106,11 @@ jobs:
             --disable-builtin-mcps \
             --no-ask-user \
             -s > review.md
+          if ! grep -q '^Verdict:' review.md; then
+            echo "::error::The review has no verdict line; not posting it."
+            cat review.md
+            exit 1
+          fi
           cat review.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
