@@ -190,7 +190,8 @@ jobs:
     needs: review
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write # the review, replies and resolving threads
+      pull-requests: write # the review and replies
+      contents: write      # resolving threads: GitHub refuses it with pull-requests alone
       issues: write        # the needs-person label
     steps:
       - uses: actions/download-artifact@v8
