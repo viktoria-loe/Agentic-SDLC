@@ -21,8 +21,9 @@
 #
 # When it runs: whenever the Review, Dependency review or PR shape workflow
 # finishes, so a pull request is judged as soon as its checks and review are
-# in; when merge-gate-wake.yml starts it as a hold ends; and on the schedule,
-# which GitHub runs hours late here, as a safety net.
+# in; when merge-gate-wake.yml starts it as a hold ends, or five minutes after
+# a run that found only checks still running (CodeQL does not start it); and on
+# the schedule, which GitHub runs hours late here, as a safety net.
 name: Merge gate
 
 on:
@@ -222,6 +223,14 @@ jobs:
                 wakes.push({ pr: pr.number, seconds: Math.ceil((holdEnds - Date.now()) / 1000) + 60 });
               }
               if (Date.now() < holdEnds) waits.push(`the hold, until ${mergeAfter}`);
+
+              // Checks still running and nothing else in the way: some checks (CodeQL default
+              // setup) do not start the gate when they finish, so look again in five minutes.
+              // Only PENDING: an EXPECTED check that never starts would wake the gate forever.
+              const onlyChecksLeft = waits.every(w => w.startsWith('checks are') || w.startsWith('the hold'));
+              if (policy.mode === 'auto' && tier === 0 && checks === 'PENDING' && onlyChecksLeft && !wakes.some(w => w.pr === pr.number)) {
+                wakes.push({ pr: pr.number, seconds: 300 });
+              }
 
               // 3. The decision, written between the factory-notes markers
               const ready = tier === 0 && waits.length === 0;
